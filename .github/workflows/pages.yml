@@ -1,0 +1,103 @@
+name: Publish course materials
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download and verify material originals
+        run: |
+          python - <<'PY'
+          """Build a verified static copy of the public course-material release."""
+          from concurrent.futures import ThreadPoolExecutor
+          import hashlib
+          from html import escape
+          import json
+          from pathlib import Path
+          import re
+          import time
+          from urllib.request import urlopen
+
+          RELEASE = 'https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/'
+          LIMIT = 750_000_000
+
+
+          def validate(records):
+              names = set()
+              for item in records:
+                  name = item['name']
+                  if (not re.fullmatch(r'(?:material-[a-f0-9]{64}|boiler-review-notes-klx)\.(?:pdf|docx?)', name)
+                          or name in names or not re.fullmatch(r'[a-f0-9]{64}', item['sha256'])
+                          or type(item['size']) is not int or item['size'] < 1
+                          or item['url'] != RELEASE + name):
+                      raise ValueError(f'Invalid or repeated material: {name}')
+                  names.add(name)
+              if not records or sum(item['size'] for item in records) > LIMIT:
+                  raise ValueError('Empty inventory or material budget exceeded')
+
+
+          def download(item, folder):
+              target = folder / item['name']
+              temporary = target.with_suffix(target.suffix + '.part')
+              for attempt in range(3):
+                  try:
+                      digest, size = hashlib.sha256(), 0
+                      with urlopen(item['url'], timeout=60) as response, temporary.open('wb') as output:
+                          while block := response.read(1024 * 1024):
+                              size += len(block)
+                              if size > item['size']:
+                                  raise ValueError('Downloaded file is larger than inventory')
+                              digest.update(block)
+                              output.write(block)
+                      if (size, digest.hexdigest()) != (item['size'], item['sha256']):
+                          raise ValueError('Downloaded file does not match size and SHA-256')
+                      temporary.replace(target)
+                      return
+                  except Exception:
+                      temporary.unlink(missing_ok=True)
+                      if attempt == 2:
+                          raise
+                      time.sleep(2 ** attempt)
+
+
+          def build(records, title, folder=Path('_site')):
+              validate(records)
+              folder.mkdir(parents=True, exist_ok=True)
+              if any(folder.iterdir()):
+                  raise ValueError('Build output must be empty')
+              with ThreadPoolExecutor(max_workers=4) as pool:
+                  list(pool.map(lambda item: download(item, folder), records))
+              (folder / 'manifest.json').write_text(json.dumps(records, ensure_ascii=False, indent=2))
+              links = ''.join(f'<li><a href="{item["name"]}">{escape(Path(item["path"]).name)}</a></li>' for item in records)
+              (folder / 'index.html').write_text('<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
+                  '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                  f'<title>{escape(title)} · 源梦紫金</title><h1>{escape(title)}</h1>'
+                  '<p><a href="https://zjusuee.github.io/">返回源梦紫金</a></p><ul>' + links + '</ul></html>')
+              if sum(path.stat().st_size for path in folder.iterdir()) > LIMIT:
+                  raise ValueError('Published site budget exceeded')
+
+          records = json.loads('[{"path": "Flybook/2018/2018.pdf", "name": "material-ab9cc9b6409d7145bf3d2fa9fba9a81cd7e07eb14254256d74fa9496d2943e3f.pdf", "sha256": "ab9cc9b6409d7145bf3d2fa9fba9a81cd7e07eb14254256d74fa9496d2943e3f", "size": 3278100, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-ab9cc9b6409d7145bf3d2fa9fba9a81cd7e07eb14254256d74fa9496d2943e3f.pdf"}, {"path": "Flybook/2019/2019.pdf", "name": "material-94e17417e745baafd0c306d4a9b1373d3f79525a4a7dfce91e5909b93b82cb2a.pdf", "sha256": "94e17417e745baafd0c306d4a9b1373d3f79525a4a7dfce91e5909b93b82cb2a", "size": 3962104, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-94e17417e745baafd0c306d4a9b1373d3f79525a4a7dfce91e5909b93b82cb2a.pdf"}, {"path": "Flybook/2024/2024.pdf", "name": "material-38fe3040320963fa978f382a0348747f956b0498374a830c99828cd0a3dbf2e4.pdf", "sha256": "38fe3040320963fa978f382a0348747f956b0498374a830c99828cd0a3dbf2e4", "size": 1733851, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-38fe3040320963fa978f382a0348747f956b0498374a830c99828cd0a3dbf2e4.pdf"}, {"path": "courses/public/fundamental/工程力学/Engineering Mechanics.pdf", "name": "material-5d8a53aee6fddf30c48939da828302f11c12ec9bea16e84352f998f9347f3d67.pdf", "sha256": "5d8a53aee6fddf30c48939da828302f11c12ec9bea16e84352f998f9347f3d67", "size": 4854086, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-5d8a53aee6fddf30c48939da828302f11c12ec9bea16e84352f998f9347f3d67.pdf"}, {"path": "courses/public/fundamental/工程力学/工程力学 思维导图.pdf", "name": "material-3ead53bb73cbdfccf77c2f79e5787e6ff688f256d4d88f5b64e033b5d9364d6a.pdf", "sha256": "3ead53bb73cbdfccf77c2f79e5787e6ff688f256d4d88f5b64e033b5d9364d6a", "size": 516883, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-3ead53bb73cbdfccf77c2f79e5787e6ff688f256d4d88f5b64e033b5d9364d6a.pdf"}, {"path": "courses/public/fundamental/工程流体力学（甲）/工程流体力学 笔记.pdf", "name": "material-036218c0e667fddc08495b7385d5848fd7b4165269d00cbdbe572ff2610090c8.pdf", "sha256": "036218c0e667fddc08495b7385d5848fd7b4165269d00cbdbe572ff2610090c8", "size": 52401893, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-036218c0e667fddc08495b7385d5848fd7b4165269d00cbdbe572ff2610090c8.pdf"}, {"path": "courses/public/fundamental/工程流体力学（甲）/工程流体力学（1、2）精简版笔记.pdf", "name": "material-5227d6709af6e5000e607724ebcc54a42143533d35a276396c080de7d88e4539.pdf", "sha256": "5227d6709af6e5000e607724ebcc54a42143533d35a276396c080de7d88e4539", "size": 3593020, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-5227d6709af6e5000e607724ebcc54a42143533d35a276396c080de7d88e4539.pdf"}, {"path": "courses/public/fundamental/常微分方程/常微分总结ckx.pdf", "name": "material-41c125b2607a74ec232f8dfb49f5b27226dac33fac8e53e20058daa76e60b8ab.pdf", "sha256": "41c125b2607a74ec232f8dfb49f5b27226dac33fac8e53e20058daa76e60b8ab", "size": 4250006, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-41c125b2607a74ec232f8dfb49f5b27226dac33fac8e53e20058daa76e60b8ab.pdf"}, {"path": "courses/public/fundamental/常微分方程/常微分方程ljy.pdf", "name": "material-5b44ca4f6f841b5f06323e1f9037a57084aac446b9ddea00989ad491d9d659c7.pdf", "sha256": "5b44ca4f6f841b5f06323e1f9037a57084aac446b9ddea00989ad491d9d659c7", "size": 39784374, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-5b44ca4f6f841b5f06323e1f9037a57084aac446b9ddea00989ad491d9d659c7.pdf"}, {"path": "courses/public/fundamental/微积分与数学分析/微积分总结2.pdf", "name": "material-549d0e2bcb97545b36a149dc5dee45e43b6f914165b5b2d67ac577289bba88ff.pdf", "sha256": "549d0e2bcb97545b36a149dc5dee45e43b6f914165b5b2d67ac577289bba88ff", "size": 11827239, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-549d0e2bcb97545b36a149dc5dee45e43b6f914165b5b2d67ac577289bba88ff.pdf"}, {"path": "courses/public/fundamental/数理方法/数理方法 I•II.pdf", "name": "material-2ab7ef6092632b2765a688ac1ecc8930187e493550e2c1eb588c3d131363a243.pdf", "sha256": "2ab7ef6092632b2765a688ac1ecc8930187e493550e2c1eb588c3d131363a243", "size": 33908786, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-2ab7ef6092632b2765a688ac1ecc8930187e493550e2c1eb588c3d131363a243.pdf"}, {"path": "courses/public/fundamental/数理方法/数理方法I.pdf", "name": "material-ce70c2338687e5731dfea4cb038f1ab7acd307cf6c5485915bb7eca2c24ac782.pdf", "sha256": "ce70c2338687e5731dfea4cb038f1ab7acd307cf6c5485915bb7eca2c24ac782", "size": 13698989, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-ce70c2338687e5731dfea4cb038f1ab7acd307cf6c5485915bb7eca2c24ac782.pdf"}, {"path": "courses/public/fundamental/数理方法/数理方法II简括.pdf", "name": "material-baa4dce9fb6a072dc5cfdb32cc7319bcde495d8ee473315e5bf417595d1c251d.pdf", "sha256": "baa4dce9fb6a072dc5cfdb32cc7319bcde495d8ee473315e5bf417595d1c251d", "size": 2708626, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-baa4dce9fb6a072dc5cfdb32cc7319bcde495d8ee473315e5bf417595d1c251d.pdf"}, {"path": "courses/public/fundamental/机械设计基础（甲）/机械设计基础.pdf", "name": "material-25cfb7413d83969a876e6169892adbadeb92090e36ccd237f6d1c05fd3c61a76.pdf", "sha256": "25cfb7413d83969a876e6169892adbadeb92090e36ccd237f6d1c05fd3c61a76", "size": 13976127, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-25cfb7413d83969a876e6169892adbadeb92090e36ccd237f6d1c05fd3c61a76.pdf"}, {"path": "courses/public/fundamental/材料力学（乙）/材料力学补天+自测.pdf", "name": "material-0020c9aa687217b117253a9c84f6ff6bc010e6ed3acc9f78207ed9916b546118.pdf", "sha256": "0020c9aa687217b117253a9c84f6ff6bc010e6ed3acc9f78207ed9916b546118", "size": 60339600, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-0020c9aa687217b117253a9c84f6ff6bc010e6ed3acc9f78207ed9916b546118.pdf"}, {"path": "courses/public/fundamental/概率论及数理统计/概率论与数理统计 笔记.pdf", "name": "material-15a613f09dd7a4ec755612e89e61ad87c817eb8842dcc6bb602b506133e3dab3.pdf", "sha256": "15a613f09dd7a4ec755612e89e61ad87c817eb8842dcc6bb602b506133e3dab3", "size": 49071654, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-15a613f09dd7a4ec755612e89e61ad87c817eb8842dcc6bb602b506133e3dab3.pdf"}, {"path": "courses/public/fundamental/概率论及数理统计/概率论与数理统计ckx.pdf", "name": "material-698f2f4a830089fe1c21fa97544a909056661e7e7af627a5e1452e76237c4437.pdf", "sha256": "698f2f4a830089fe1c21fa97544a909056661e7e7af627a5e1452e76237c4437", "size": 21531995, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-698f2f4a830089fe1c21fa97544a909056661e7e7af627a5e1452e76237c4437.pdf"}, {"path": "courses/public/fundamental/概率论及数理统计/概统总结.pdf", "name": "material-07eff56e8fb57a75c3e30ed5464ebe3b51618733b9d9700dd9bb88d35aea7fb7.pdf", "sha256": "07eff56e8fb57a75c3e30ed5464ebe3b51618733b9d9700dd9bb88d35aea7fb7", "size": 229288, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-07eff56e8fb57a75c3e30ed5464ebe3b51618733b9d9700dd9bb88d35aea7fb7.pdf"}, {"path": "courses/public/fundamental/物理/普通物理学Ⅱ.pdf", "name": "material-125ee2bf6a4de056bc0505c31e801f008fe5a456ab5a342a94fc2aabf81efe39.pdf", "sha256": "125ee2bf6a4de056bc0505c31e801f008fe5a456ab5a342a94fc2aabf81efe39", "size": 30884857, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-125ee2bf6a4de056bc0505c31e801f008fe5a456ab5a342a94fc2aabf81efe39.pdf"}, {"path": "courses/public/fundamental/电工电子学/电工电子学.pdf", "name": "material-c1891e703555cd157295639088dfd91e669319aa5c529f8f97eab8782df6828a.pdf", "sha256": "c1891e703555cd157295639088dfd91e669319aa5c529f8f97eab8782df6828a", "size": 729820, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-c1891e703555cd157295639088dfd91e669319aa5c529f8f97eab8782df6828a.pdf"}, {"path": "courses/public/fundamental/电工电子学及实验/电工电子学及实验复习提纲 - 2024.pdf", "name": "material-37998bd25eafc51f40336d94565898f92fc413262bebe877cd9159d914d9b2b9.pdf", "sha256": "37998bd25eafc51f40336d94565898f92fc413262bebe877cd9159d914d9b2b9", "size": 119986, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-37998bd25eafc51f40336d94565898f92fc413262bebe877cd9159d914d9b2b9.pdf"}, {"path": "courses/public/fundamental/随机过程/随机过程.pdf", "name": "material-a5e738176ce7ff73cbe3918e29661f0f1949d12efff67aaa054fa72e59a19637.pdf", "sha256": "a5e738176ce7ff73cbe3918e29661f0f1949d12efff67aaa054fa72e59a19637", "size": 4494672, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-a5e738176ce7ff73cbe3918e29661f0f1949d12efff67aaa054fa72e59a19637.pdf"}, {"path": "courses/public/professional/传热学（甲）/Heat_Transfer.pdf", "name": "material-5413fc0da17172d206e7eabd22222c1f8672093396d6e84c33a6ade33ba233c8.pdf", "sha256": "5413fc0da17172d206e7eabd22222c1f8672093396d6e84c33a6ade33ba233c8", "size": 1929140, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-5413fc0da17172d206e7eabd22222c1f8672093396d6e84c33a6ade33ba233c8.pdf"}, {"path": "courses/public/professional/传热学（甲）/传热学 思维导图.pdf", "name": "material-0e4c37f63a8d2bdb6c7cca285f9a0aba52c0c858704a67667707e0779ecf333a.pdf", "sha256": "0e4c37f63a8d2bdb6c7cca285f9a0aba52c0c858704a67667707e0779ecf333a", "size": 661553, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-0e4c37f63a8d2bdb6c7cca285f9a0aba52c0c858704a67667707e0779ecf333a.pdf"}, {"path": "courses/public/professional/传热学（甲）/传热学笔记by陈晨.pdf", "name": "material-e515a1b106a443aafc0581641761cca07084320516a2c32e67bcb544b6ddc350.pdf", "sha256": "e515a1b106a443aafc0581641761cca07084320516a2c32e67bcb544b6ddc350", "size": 6704834, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-e515a1b106a443aafc0581641761cca07084320516a2c32e67bcb544b6ddc350.pdf"}, {"path": "courses/public/professional/传热学（甲）/传热学（考研笔记）by 李楚乔.pdf", "name": "material-5bef90875882caa2135006f53ffa429e234389197d6bbbc6f85473fdf7cee3e5.pdf", "sha256": "5bef90875882caa2135006f53ffa429e234389197d6bbbc6f85473fdf7cee3e5", "size": 75715113, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-5bef90875882caa2135006f53ffa429e234389197d6bbbc6f85473fdf7cee3e5.pdf"}, {"path": "courses/public/professional/工程热力学（甲）/Thermal engineering.pdf", "name": "material-b0d6d3c98494ead843faa6a269c92740ae39ac32f06e4e7b0800f4a1fa9120fb.pdf", "sha256": "b0d6d3c98494ead843faa6a269c92740ae39ac32f06e4e7b0800f4a1fa9120fb", "size": 7025209, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-b0d6d3c98494ead843faa6a269c92740ae39ac32f06e4e7b0800f4a1fa9120fb.pdf"}, {"path": "courses/public/professional/工程热力学（甲）/工程热力学 思维导图.pdf", "name": "material-9624ecee719e81195d38743f443c10a5f8dff9da5ca2b976bb0981cacb202fbb.pdf", "sha256": "9624ecee719e81195d38743f443c10a5f8dff9da5ca2b976bb0981cacb202fbb", "size": 954512, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-9624ecee719e81195d38743f443c10a5f8dff9da5ca2b976bb0981cacb202fbb.pdf"}, {"path": "courses/public/professional/工程热力学（甲）/热力学公式整理.docx", "name": "material-4b662803f4f6a94d770b7cfca065d898865a777cc3604cd92b3deb9a97ca62f7.docx", "sha256": "4b662803f4f6a94d770b7cfca065d898865a777cc3604cd92b3deb9a97ca62f7", "size": 31372, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-4b662803f4f6a94d770b7cfca065d898865a777cc3604cd92b3deb9a97ca62f7.docx"}, {"path": "courses/public/professional/工程热力学（甲）/热力学公式整理.pdf", "name": "material-295a780855c20169f03f1899540d9343eb70b85533af4313bcde6471da645933.pdf", "sha256": "295a780855c20169f03f1899540d9343eb70b85533af4313bcde6471da645933", "size": 334920, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-295a780855c20169f03f1899540d9343eb70b85533af4313bcde6471da645933.pdf"}, {"path": "courses/public/professional/热工实验/热工实验2 by 燕天润.pdf", "name": "material-c21e83ce3f82eff2b900d13508164638b7bfa5591ecac365d9fd3974235fcf33.pdf", "sha256": "c21e83ce3f82eff2b900d13508164638b7bfa5591ecac365d9fd3974235fcf33", "size": 2370057, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-c21e83ce3f82eff2b900d13508164638b7bfa5591ecac365d9fd3974235fcf33.pdf"}, {"path": "courses/public/professional/能源与环境系统工程概论/能环概论复习提纲-20级燕天润.pdf", "name": "material-6714cfaf301db3d15f2f8ae480ac70c5eef1bf6a795a107de0c40d36762982bc.pdf", "sha256": "6714cfaf301db3d15f2f8ae480ac70c5eef1bf6a795a107de0c40d36762982bc", "size": 1302974, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-6714cfaf301db3d15f2f8ae480ac70c5eef1bf6a795a107de0c40d36762982bc.pdf"}, {"path": "courses/public/professional/自动控制理论/Control.pdf", "name": "material-587700241c9c7c9cb56dc2b615ae710b12356b4bed30d7b284a325231c1330bf.pdf", "sha256": "587700241c9c7c9cb56dc2b615ae710b12356b4bed30d7b284a325231c1330bf", "size": 1007205, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-587700241c9c7c9cb56dc2b615ae710b12356b4bed30d7b284a325231c1330bf.pdf"}, {"path": "courses/public/professional/自动控制理论/自控公式整理.docx", "name": "material-52711f5b5d633faaf84b85bcb439860f7e08cb73f08b0e6addde763747573ec3.docx", "sha256": "52711f5b5d633faaf84b85bcb439860f7e08cb73f08b0e6addde763747573ec3", "size": 30085, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-52711f5b5d633faaf84b85bcb439860f7e08cb73f08b0e6addde763747573ec3.docx"}, {"path": "courses/public/professional/自动控制理论/自控公式整理.pdf", "name": "material-9377cd0847cd6e4448cc1c6b87652c05e4c58065f5efdc51d81a790ccf3acb7b.pdf", "sha256": "9377cd0847cd6e4448cc1c6b87652c05e4c58065f5efdc51d81a790ccf3acb7b", "size": 373451, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-9377cd0847cd6e4448cc1c6b87652c05e4c58065f5efdc51d81a790ccf3acb7b.pdf"}, {"path": "material-previews/4b662803f4f6a94d770b7cfca065d898865a777cc3604cd92b3deb9a97ca62f7.pdf", "name": "material-13c0d3c29014ba94fc6eebdbe414db43ed7f7151a4982147af54df35dbda01ab.pdf", "sha256": "13c0d3c29014ba94fc6eebdbe414db43ed7f7151a4982147af54df35dbda01ab", "size": 269474, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-13c0d3c29014ba94fc6eebdbe414db43ed7f7151a4982147af54df35dbda01ab.pdf"}, {"path": "material-previews/52711f5b5d633faaf84b85bcb439860f7e08cb73f08b0e6addde763747573ec3.pdf", "name": "material-a4a1397be1f9abe8468bc440d2414ad5636d0a18fb56c528cf94e01f67ba8882.pdf", "sha256": "a4a1397be1f9abe8468bc440d2414ad5636d0a18fb56c528cf94e01f67ba8882", "size": 292367, "url": "https://github.com/ZJUSUEE/ZJUSUEE.github.io/releases/download/learning-materials-2026-10-15/material-a4a1397be1f9abe8468bc440d2414ad5636d0a18fb56c528cf94e01f67ba8882.pdf"}]')
+          build(records, '基础课与公共资料')
+          PY
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - uses: actions/deploy-pages@v4
+        id: deployment
